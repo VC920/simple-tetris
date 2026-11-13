@@ -9,7 +9,7 @@ SDL3
 SDL3_mixer  
 
 ## Func
-![pic](./assets/texture/demo.png)  
+![pic](./assets/demo.png)  
 
 ## Notice
 have no "Wall Kick" and "T-Spin"  
