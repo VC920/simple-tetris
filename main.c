@@ -23,8 +23,11 @@ static struct {
     SDL_Renderer *renderer;
     MIX_Mixer *mixer;
     MIX_Track *bgm_track;
+    MIX_Track *sfx_track;
     bool quit;
     bool keys[128]; // ASCII
+    SDL_JoystickID *gamepad_id;
+    SDL_Gamepad *gamepad;
     float dt;
     uint64_t last_ticks;
     uint64_t current_ticks;
@@ -35,6 +38,8 @@ static struct {
     .bgm_track = NULL,
     .quit = false,
     .keys = {false},
+    .gamepad_id = NULL,
+    .gamepad = NULL,
     .dt = 0.0f,
     .last_ticks = 0,
     .current_ticks = 0,
@@ -46,6 +51,7 @@ typedef struct {
 } Lines;
 
 static struct {
+    bool game_over;
     unsigned char field[FIELD_WIDTH * FIELD_HEIGHT];
     Lines clear_lines;
     int current_type;
@@ -55,6 +61,7 @@ static struct {
     int current_y;
     float drop_timer;
 } game = {
+    .game_over = false,
     .field        = {0},
     .current_type = 0,
     .next_type    = 0,
@@ -63,6 +70,9 @@ static struct {
     .current_y    = 0,
     .drop_timer   = 0.0f
 };
+
+static MIX_Audio *bgm;
+static MIX_Audio *click;
 
 static const char *tetromino[] = {
     "..X." "..X." "..X." "..X." ,
@@ -106,16 +116,18 @@ static bool can_move(int type, int r, int pos_x, int pos_y)
     return true;
 }
 
-#define MOVE_DELAY_TIME 0.2f
+#define MOVE_DELAY_TIME 0.15f
 void input()
 {
+    if (game.game_over)
+        return;
+    
     static float move_horizontal_timer = 0.0f;
     static float move_down_timer       = 0.0f;
-    static float rotate_timer          = 0.0f;
 
     move_horizontal_timer   += platform.dt;
     move_down_timer   += platform.dt;
-    rotate_timer += platform.dt;
+    
     // Move left right
     if (platform.keys['a'] ) {
         if (move_horizontal_timer > MOVE_DELAY_TIME
@@ -131,6 +143,7 @@ void input()
             move_horizontal_timer = 0.0f;
         }
     }
+    
     // Soft down
     if (platform.keys['s'] ) {
         if (move_down_timer > MOVE_DELAY_TIME
@@ -140,26 +153,40 @@ void input()
             game.drop_timer = 0.0f;
         }
     }
+    
     // Hard down
-    if (platform.keys[32] ) {
-        while (can_move(game.current_type, game.current_r, game.current_x, game.current_y + 1)) {
-            game.current_y++;
-            platform.keys[32] = false;
-            game.drop_timer = drop_max_time;
+    static bool is_hard_down = false;
+    if (platform.keys[32]) {
+        if (!is_hard_down) {
+            while (can_move(game.current_type, game.current_r, game.current_x, game.current_y + 1)) {
+                game.current_y++;
+                game.drop_timer = drop_max_time;
+            
+            }
+            is_hard_down = true;
         }
+    } else {
+        is_hard_down = false;
     }
-    // Rotate 
+    
+    // Rotate
+    static bool is_rotate = false;
     if (platform.keys['w']) {
-        if (rotate_timer > MOVE_DELAY_TIME
-            && can_move(game.current_type, game.current_r + 1, game.current_x, game.current_y)) {
+        if (can_move(game.current_type, game.current_r + 1, game.current_x, game.current_y)
+            && !is_rotate) {
             game.current_r++;
-            rotate_timer = 0.0f;
+            is_rotate = true;
         }
+    } else {
+        is_rotate = false;
     }
 }
 
 void update()
 {
+    if (game.game_over)
+        return;
+    
     // Clear full lines
     if (game.clear_lines.count != 0) {
         static float clear_delay_timer = 0.0f;
@@ -178,6 +205,9 @@ void update()
             game.clear_lines.count = 0;
             clear_delay_timer = 0.0f;
         }
+
+        // Gamepad shock
+        SDL_RumbleGamepad(platform.gamepad, 0x8888, 0x8888, 300);
     }
 
     // Drop
@@ -188,6 +218,9 @@ void update()
     if (can_move(game.current_type, game.current_r, game.current_x, game.current_y + 1))
         game.current_y++;
     else {
+        // Gamepad Shock
+        SDL_RumbleGamepad(platform.gamepad, 0x4444, 0x4444, 200);
+        
         // Lock current block
         for (int y = 0; y < 4; y++) {
             for (int x = 0; x < 4; x++) {
@@ -197,7 +230,6 @@ void update()
         }
         
         // Check clear line
-
         #define CLEAR_ANIMATION_DELAY_TIME 1.0f
         for (int y = 0; y < 4; y++) {
             if (game.current_y + y < FIELD_HEIGHT) {
@@ -226,6 +258,12 @@ void update()
             game.next_type = rand() % 7;
 
         // Check full
+        if (!can_move(game.current_type, game.current_r, game.current_x, game.current_y)) {
+            game.game_over = true;
+        }
+
+        MIX_SetTrackAudio(platform.sfx_track, click);
+        MIX_PlayTrack(platform.sfx_track, 0);
     }
 
     game.drop_timer = 0.0f;
@@ -317,29 +355,36 @@ void render()
 
 
 // Assets
-static MIX_Audio *bgm;
 void load_assets()
 {
-    bgm = MIX_LoadAudio(platform.mixer, "assets/bgm.mp3", false);
+    bgm = MIX_LoadAudio(platform.mixer, "assets/static.mp3", false);
+    click = MIX_LoadAudio(platform.mixer, "assets/click.mp3", false); 
 }
 
 int main()
 {
-    SDL_Init(SDL_INIT_VIDEO);
-    MIX_Init();
-    
+    // Window
+    SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD);
     platform.window = SDL_CreateWindow("tetris", WINDOW_WIDTH, WINDOW_HEIGHT, 0);
     platform.renderer = SDL_CreateRenderer(platform.window, NULL);
     SDL_SetRenderDrawBlendMode(platform.renderer, SDL_BLENDMODE_BLEND);
 
+    // Audio
+    MIX_Init();
     platform.mixer = MIX_CreateMixerDevice(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, NULL);
     platform.bgm_track = MIX_CreateTrack(platform.mixer);
+    platform.sfx_track = MIX_CreateTrack(platform.mixer);
 
+    platform.gamepad_id = SDL_GetGamepads(NULL);
+    platform.gamepad = SDL_OpenGamepad(platform.gamepad_id[0]);
+    
     // Load assets
     load_assets();
 
     // Play bgm
+    #define BGM_VALUE 0.3f
     MIX_SetTrackAudio(platform.bgm_track, bgm);
+    MIX_SetTrackGain(platform.bgm_track, BGM_VALUE);
     MIX_PlayTrack(platform.bgm_track, 0);
 
     // Init block
@@ -369,13 +414,52 @@ int main()
                 if (event.key.key > 0 && event.key.key < 128)
                     platform.keys[event.key.key] = false;
                 break;
+            //@TODO use input flag not key flag
+            case SDL_EVENT_GAMEPAD_BUTTON_DOWN:
+                switch (event.gbutton.button) {
+                case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+                    platform.keys['a'] = true;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+                    platform.keys['d'] = true;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_UP:
+                    platform.keys[32]  = true;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+                    platform.keys['s'] = true;
+                    break;
+                case SDL_GAMEPAD_BUTTON_SOUTH:
+                    platform.keys['w'] = true;
+                    break;
+                }
+                break;
+            case SDL_EVENT_GAMEPAD_BUTTON_UP:
+                switch (event.gbutton.button) {
+                case SDL_GAMEPAD_BUTTON_DPAD_LEFT:
+                    platform.keys['a'] = false;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_RIGHT:
+                    platform.keys['d'] = false;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_UP:
+                    platform.keys[32]  = false;
+                    break;
+                case SDL_GAMEPAD_BUTTON_DPAD_DOWN:
+                    platform.keys['s'] = false;
+                    break;
+                case SDL_GAMEPAD_BUTTON_SOUTH:
+                    platform.keys['w'] = false;
+                    break;
+                }
+                break;
             }
         }
 
         if (!MIX_TrackPlaying(platform.bgm_track)) {
             MIX_PlayTrack(platform.bgm_track, 0);
         }
-        
+
         input();
         update();
         render();
